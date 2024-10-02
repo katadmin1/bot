@@ -1,0 +1,147 @@
+import requests
+import pandas as pd
+import pandas_ta as ta
+from telegram import Bot, error
+import asyncio
+
+# List of coin symbols to trade
+coins = [
+    "BTCUSDT", "ETHUSDT", "BNBUSDT", "XRPUSDT", "ADAUSDT", "DOGEUSDT", "SOLUSDT",
+    "MATICUSDT", "LTCUSDT", "DOTUSDT", "TRXUSDT", "AVAXUSDT", "SHIBUSDT",
+    "LINKUSDT", "ATOMUSDT", "ETCUSDT", "XLMUSDT", "APTUSDT", "FILUSDT", "VETUSDT",
+    "ICPUSDT", "HBARUSDT", "QNTUSDT", "NEARUSDT", "LDOUSDT", "ALGOUSDT", "MKRUSDT",
+    "GRTUSDT", "AAVEUSDT", "SANDUSDT"
+]
+
+# Function to fetch 30-minute historical data from CryptoCompare
+def fetch_cryptocompare_data_30m(symbol):
+    url = f"https://min-api.cryptocompare.com/data/v2/histominute?fsym={symbol[:-4]}&tsym=USDT&limit=60&aggregate=30"
+    response = requests.get(url)
+    if response.status_code == 200:
+        data = response.json()
+        if 'Data' in data and 'Data' in data['Data']:
+            return data['Data']['Data']  # Returns list of 30-min data points
+    else:
+        print(f"Error fetching data for {symbol} from CryptoCompare: {response.status_code}")
+        return None
+
+# Function to calculate technical indicators using 30-minute data
+def calculate_indicators_30m(data):
+    # Create DataFrame with historical 30-minute data
+    df = pd.DataFrame(data)
+    
+    # Convert necessary columns to numeric types
+    df['high'] = pd.to_numeric(df['high'])
+    df['low'] = pd.to_numeric(df['low'])
+    df['open'] = pd.to_numeric(df['open'])
+    df['close'] = pd.to_numeric(df['close'])
+    df['volumefrom'] = pd.to_numeric(df['volumefrom'])
+
+    # Calculate the technical indicators (e.g., RSI, MACD, Stochastic, ADX, EMA)
+    df['RSI'] = ta.rsi(df['close'], length=14)
+
+    # Handle MACD which returns multiple columns
+    macd = ta.macd(df['close'])
+    df['MACD_line'] = macd['MACD_12_26_9']
+    df['MACD_signal'] = macd['MACDs_12_26_9']
+    df['MACD_hist'] = macd['MACDh_12_26_9']
+
+    # Handle Stochastic which returns multiple columns
+    stoch = ta.stoch(df['high'], df['low'], df['close'])
+    df['Stoch_K'] = stoch['STOCHk_14_3_3']
+    df['Stoch_D'] = stoch['STOCHd_14_3_3']
+
+    # Handle ADX which returns multiple columns
+    adx = ta.adx(df['high'], df['low'], df['close'])
+    df['ADX'] = adx['ADX_14']
+    df['DI+'] = adx['DMP_14']  # +DI
+    df['DI-'] = adx['DMN_14']  # -DI
+
+    # Other indicators
+    df['EMA20'] = ta.ema(df['close'], length=20)
+
+    return df
+
+# Function to format the trade signal based on buy/sell conditions
+def format_trade_signal(symbol, indicators):
+    close_price = indicators['close'].iloc[-1]
+    rsi = indicators['RSI'].iloc[-1]
+    ema20 = indicators['EMA20'].iloc[-1]
+
+    # Determine buy/sell signal based on conditions
+    if rsi < 70 and ema20 < close_price:
+        trade_action = "BUY Signal 📈"
+    elif rsi > 70 and ema20 > close_price:
+        trade_action = "SELL Signal 📉"
+    else:
+        return None  # No signal if conditions are not met
+
+    # Signal format as per your requirement
+    signal = f"""
+    ⚡️⚡️ #{symbol}/USDT ⚡️⚡️
+    
+    Signal Type: Regular {symbol}
+    Leverage: Isolated (10X)
+    
+    Entry Zone: {indicators['close'].iloc[-1]}  
+    
+    Take-Profit Targets:
+    1) {indicators['close'].iloc[-1] * 1.01:.2f}  
+    2) {indicators['close'].iloc[-1] * 1.02:.2f}  
+    3) {indicators['close'].iloc[-1] * 1.03:.2f}  
+    4) {indicators['close'].iloc[-1] * 1.04:.2f}  
+    5) {indicators['close'].iloc[-1] * 1.05:.2f}  
+    
+    Stop Targets:
+    1) {indicators['close'].iloc[-1] * 0.99:.2f}  
+    
+    """
+    
+    return signal
+
+# Asynchronous function to send trade signals to Telegram with retry logic
+async def send_telegram_signal(bot_token, chat_id, signal, retries=3, delay=10):
+    bot = Bot(token=bot_token)
+    for attempt in range(retries):
+        try:
+            await bot.send_message(chat_id=chat_id, text=signal)
+            print(f"Message sent successfully to {chat_id}")
+            break  # Exit loop if message sent successfully
+        except error.TimedOut:
+            print(f"Failed to send message due to timeout. Retrying in {delay} seconds...")
+            await asyncio.sleep(delay)  # Wait before retrying
+        except Exception as e:
+            print(f"Unexpected error: {e}")
+            break  # Exit loop on non-timeout errors
+
+# Telegram bot token and chat ID
+bot_token = "YOUR_BOT_TOKEN"  # Replace with your bot token
+chat_id = "YOUR_CHAT_ID"  # Replace with your chat ID
+
+# Asynchronous main function to process coins
+async def main():
+    batch_size = 3  # Set batch size to 3 to reduce API requests
+    delay_between_batches = 60  # Delay between batches set to 1 hour (3600 seconds)
+    
+    # Loop through the coins in batches
+    for i in range(0, len(coins), batch_size):
+        batch = coins[i:i+batch_size]  # Take a batch of coins
+        for coin in batch:
+            # Fetch 30-minute data from CryptoCompare
+            cryptocompare_data = fetch_cryptocompare_data_30m(coin)
+
+            if cryptocompare_data:
+                # Now calculate indicators using the 30-minute data
+                indicators = calculate_indicators_30m(cryptocompare_data)
+                signal = format_trade_signal(coin, indicators)
+                
+                if signal:  # Only send signal if it's not None
+                    await send_telegram_signal(bot_token, chat_id, signal)
+
+        # Wait before processing the next batch
+        print(f"Completed batch {i//batch_size + 1}. Waiting {delay_between_batches / 60} minutes before processing the next batch.")
+        await asyncio.sleep(delay_between_batches)
+
+# Run the asynchronous main function
+if __name__ == '__main__':
+    asyncio.run(main())
